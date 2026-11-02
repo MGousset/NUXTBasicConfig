@@ -278,7 +278,7 @@ cat > eslint.config.mjs <<'EOF'
 // ESLint ne garde que ce qu'Oxlint ne sait pas faire (templates Vue, règles Nuxt).
 // eslint-plugin-oxlint désactive les règles en doublon : il doit rester en dernier.
 import oxlint from 'eslint-plugin-oxlint'
-import withNuxt from './.nuxt/eslint.config.mjs'
+import { withNuxt } from './.nuxt/eslint.config.mjs'
 
 export default withNuxt(...oxlint.buildFromOxlintConfigFile('./.oxlintrc.json'))
 EOF
@@ -704,7 +704,7 @@ pnpm add -D \
   wrangler \
   oxlint oxfmt \
   @nuxt/eslint eslint eslint-plugin-oxlint \
-  typescript vue-tsc \
+  typescript@~6.0.3 vue-tsc \
   lefthook
 
 # postinstall ajouté APRÈS l'install, sinon `nuxt prepare` se lance
