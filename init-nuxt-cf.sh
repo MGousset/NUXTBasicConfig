@@ -1,87 +1,196 @@
 #!/usr/bin/env bash
-# ============================================================
-#  init-nuxt-cf.sh (pnpm)
-#  Nuxt 4 + Tailwind v4 + GSAP + Cloudflare Workers (Wrangler)
-#  Usage : ./init-nuxt-cf.sh mon-projet
-# ============================================================
+# =============================================================================
+#  init-nuxt-cf.sh — v3
+#  Nuxt 4 + Tailwind v4 + GSAP + Cloudflare Workers
+#  pnpm · Oxlint + ESLint (Vue) · Oxfmt · Lefthook · GitHub Actions
+#  Usage : ./init-nuxt-cf.sh <nom-du-projet>
+# =============================================================================
 set -euo pipefail
 
-# ---------- Couleurs ----------
-GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
-step() { echo -e "\n${BLUE}▶ $1${NC}"; }
-ok()   { echo -e "${GREEN}✔ $1${NC}"; }
-warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
-fail() { echo -e "${RED}✖ $1${NC}"; exit 1; }
+APP_NAME="${1:-my-nuxt-app}"
+COMPAT_DATE="$(date +%Y-%m-%d)"
 
-# ---------- Arguments ----------
-PROJECT_NAME="${1:-}"
-[ -z "$PROJECT_NAME" ] && fail "Usage : ./init-nuxt-cf.sh <nom-du-projet>"
-[ -d "$PROJECT_NAME" ] && fail "Le dossier '$PROJECT_NAME' existe déjà."
+info() { printf "\033[1;34m▶ %s\033[0m\n" "$*"; }
+ok()   { printf "\033[1;32m✔ %s\033[0m\n" "$*"; }
+warn() { printf "\033[1;33m⚠ %s\033[0m\n" "$*"; }
+fail() { printf "\033[1;31m✖ %s\033[0m\n" "$*" >&2; exit 1; }
 
-WORKER_NAME=$(echo "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
-TODAY=$(date +%F)
+# ----------------------------------------------------------------------------
+# 0. Vérifications
+# ----------------------------------------------------------------------------
+info "Vérification des prérequis"
+command -v node >/dev/null || fail "Node.js introuvable (>= 22.19 requis, 24 LTS conseillé)"
+command -v pnpm >/dev/null || fail "pnpm introuvable → npm install -g pnpm@latest"
+command -v git  >/dev/null || fail "git introuvable"
 
-# ---------- Prérequis ----------
-step "Vérification des prérequis"
-command -v node >/dev/null || fail "Node.js n'est pas installé."
-NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
-[ "$NODE_MAJOR" -lt 20 ] && fail "Node >= 20 requis (actuel : $(node -v))."
-
-if ! command -v pnpm >/dev/null; then
-  warn "pnpm introuvable, installation globale via npm..."
-  npm install -g pnpm || fail "Impossible d'installer pnpm (essaie avec sudo ou via https://pnpm.io/installation)."
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]')"
+if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 19 ]; }; then
+  fail "Node $(node -v) détecté, il faut >= 22.19 (24 LTS conseillé)"
 fi
-PNPM_VERSION=$(pnpm -v)
-ok "Node $(node -v) / pnpm $PNPM_VERSION"
 
-# ---------- 1. Création du projet Nuxt (sans install) ----------
-step "Création du projet Nuxt"
-pnpm create nuxt@latest "$PROJECT_NAME" \
-  --template minimal \
-  --packageManager pnpm \
-  --gitInit \
-  --no-install
-cd "$PROJECT_NAME"
+PNPM_VERSION="$(pnpm -v)"
+PNPM_MAJOR="${PNPM_VERSION%%.*}"
+[ "$PNPM_MAJOR" -ge 11 ] || fail "pnpm $PNPM_VERSION détecté, il faut >= 11 → npm install -g pnpm@latest"
 
-if [ -d "app" ]; then SRC="app"; else SRC="."; fi
-ok "Projet créé (dossier source : $SRC)"
+if ! [[ "$APP_NAME" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+  fail "Nom invalide : minuscules, chiffres et tirets uniquement (contrainte Cloudflare)"
+fi
+[ -e "$APP_NAME" ] && fail "Le dossier '$APP_NAME' existe déjà"
 
-# ---------- 2. Config pnpm (avant toute installation) ----------
-step "Configuration de pnpm"
-cat > pnpm-workspace.yaml <<'EOF'
-# Paquets autorisés à exécuter leurs scripts d'installation (pnpm v10+)
-onlyBuiltDependencies:
-  - '@parcel/watcher'
-  - esbuild
-  - sharp
-  - unrs-resolver
-  - workerd
+GIT_USER_OK=true
+if [ -z "$(git config user.name || true)" ] || [ -z "$(git config user.email || true)" ]; then
+  GIT_USER_OK=false
+  warn "git user.name / user.email non configurés : le commit initial sera ignoré"
+fi
+ok "Node $(node -v) / pnpm $PNPM_VERSION / $(git --version)"
+
+# ----------------------------------------------------------------------------
+# 1. Arborescence + Git (avant l'install, pour que Lefthook pose ses hooks)
+# ----------------------------------------------------------------------------
+info "Création de l'arborescence"
+mkdir -p "$APP_NAME"/{app/{assets/css,components,composables,pages},server/api,public,.vscode,.github/workflows}
+cd "$APP_NAME"
+
+info "Initialisation Git"
+git -c init.defaultBranch=main init -q
+
+cat > .gitignore <<'EOF'
+# --- Dépendances ---
+node_modules
+.pnpm-store
+
+# --- Nuxt / Nitro ---
+.nuxt
+.output
+.nitro
+.cache
+.data
+dist
+
+# --- Cloudflare / Wrangler ---
+.wrangler
+.dev.vars*
+!.dev.vars.example
+
+# --- Environnement ---
+.env
+.env.*
+!.env.example
+
+# --- Lefthook (surcharges perso) ---
+lefthook-local.yml
+
+# --- Logs ---
+logs
+*.log
+pnpm-debug.log*
+
+# --- OS / éditeurs ---
+.DS_Store
+Thumbs.db
+.idea
+*.swp
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 EOF
 
-npm pkg set packageManager="pnpm@${PNPM_VERSION}"
-ok "pnpm-workspace.yaml + packageManager=pnpm@${PNPM_VERSION}"
+cat > .gitattributes <<'EOF'
+# LF partout dans le dépôt (cohérent avec .editorconfig / Oxfmt)
+* text=auto eol=lf
 
-# ---------- 3. Dépendances ----------
-step "Installation des dépendances"
-pnpm install
-pnpm add gsap
-pnpm add -D tailwindcss @tailwindcss/vite \
-  wrangler \
-  @nuxt/eslint eslint \
-  prettier prettier-plugin-tailwindcss \
-  typescript vue-tsc
-ok "Dépendances installées"
+# Scripts Windows : CRLF obligatoire
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
 
-# ---------- 4. nuxt.config.ts ----------
-step "Configuration de Nuxt"
+# Scripts shell : toujours LF (sinon "bad interpreter" sous WSL / Linux)
+*.sh   text eol=lf
+
+# Fichiers générés : diff masqué, ignorés dans les stats GitHub
+pnpm-lock.yaml            -diff linguist-generated=true
+worker-configuration.d.ts linguist-generated=true
+
+# Binaires
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.avif  binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.mp4   binary
+*.webm  binary
+*.mp3   binary
+*.pdf   binary
+*.zip   binary
+
+# SVG = texte (diffable)
+*.svg   text
+EOF
+
+# ----------------------------------------------------------------------------
+# 2. package.json + pnpm-workspace.yaml
+# ----------------------------------------------------------------------------
+cat > package.json <<EOF
+{
+  "name": "$APP_NAME",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@$PNPM_VERSION",
+  "engines": { "node": ">=22.19" },
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
+    "preview": "nuxt build && wrangler dev",
+    "ship": "nuxt build && wrangler deploy",
+    "ship:preview": "nuxt build && wrangler versions upload",
+    "cf-typegen": "wrangler types",
+    "lint": "oxlint && eslint .",
+    "lint:fix": "oxlint --fix && eslint . --fix",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "nuxt typecheck",
+    "check": "pnpm lint && pnpm format:check && pnpm typecheck"
+  }
+}
+EOF
+
+# pnpm >= 11 : seuls les paquets listés ici peuvent lancer leurs scripts d'install
+cat > pnpm-workspace.yaml <<'EOF'
+allowBuilds:
+  '@parcel/watcher': true
+  '@tailwindcss/oxide': true
+  esbuild: true
+  lefthook: true
+  unrs-resolver: true
+  workerd: true
+EOF
+
+# ----------------------------------------------------------------------------
+# 3. Config Nuxt / Tailwind / TypeScript / Cloudflare
+# ----------------------------------------------------------------------------
+info "Écriture des fichiers de configuration"
+
 cat > nuxt.config.ts <<EOF
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineNuxtConfig({
-  compatibilityDate: '${TODAY}',
+  compatibilityDate: '$COMPAT_DATE',
   devtools: { enabled: true },
 
-  modules: ['@nuxt/eslint'],
+  // Tester les comportements de Nuxt 5 (à activer sur une branche dédiée)
+  // future: { compatibilityVersion: 5 },
+
+  modules: ['@nuxt/eslint', '@nuxt/fonts'],
 
   css: ['~/assets/css/main.css'],
 
@@ -89,177 +198,130 @@ export default defineNuxtConfig({
     plugins: [tailwindcss()],
   },
 
+  // Polices téléchargées au build et servies depuis ton domaine
+  fonts: {
+    families: [{ name: 'Inter', provider: 'google', weights: [400, 600, 700] }],
+  },
+
+  routeRules: {
+    // HTML statique généré au build, servi directement par les assets Cloudflare
+    '/': { prerender: true },
+    // Cache Nitro (mémoire de l'instance Worker) pendant 60 s
+    '/api/**': { cache: { maxAge: 60 } },
+  },
+
+  // Build pour Cloudflare Workers (Workers + Static Assets)
   nitro: {
     preset: 'cloudflare_module',
-    cloudflare: {
-      nodeCompat: true,
+  },
+
+  app: {
+    head: {
+      htmlAttrs: { lang: 'fr' },
+      title: '$APP_NAME',
     },
   },
-
-  typescript: {
-    strict: true,
-  },
-})
-EOF
-ok "nuxt.config.ts"
-
-# ---------- 5. Tailwind ----------
-step "Configuration de Tailwind CSS v4"
-mkdir -p "$SRC/assets/css"
-cat > "$SRC/assets/css/main.css" <<'EOF'
-@import "tailwindcss";
-
-@theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --color-brand: #6366f1;
-}
-EOF
-ok "main.css"
-
-# ---------- 6. GSAP ----------
-step "Configuration de GSAP"
-mkdir -p "$SRC/plugins" "$SRC/composables"
-
-cat > "$SRC/plugins/gsap.client.ts" <<'EOF'
-import { gsap } from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
-
-export default defineNuxtPlugin(() => {
-  gsap.registerPlugin(ScrollTrigger)
-
-  return {
-    provide: { gsap, ScrollTrigger },
-  }
 })
 EOF
 
-cat > "$SRC/composables/useGsap.ts" <<'EOF'
-import type { Ref } from 'vue'
-
-/**
- * Crée un contexte GSAP lié à un élément, avec nettoyage automatique
- * au démontage du composant (évite les fuites d'animations / ScrollTriggers).
- */
-export function useGsap(
-  scope: Ref<HTMLElement | null>,
-  setup: (gsap: typeof import('gsap').gsap) => void,
-) {
-  const { $gsap } = useNuxtApp()
-  let ctx: ReturnType<typeof $gsap.context> | undefined
-
-  onMounted(() => {
-    if (!scope.value) return
-    ctx = $gsap.context(() => setup($gsap), scope.value)
-  })
-
-  onBeforeUnmount(() => ctx?.revert())
-}
-EOF
-
-cat > "$SRC/app.vue" <<'EOF'
-<script setup lang="ts">
-const root = ref<HTMLElement | null>(null)
-
-useGsap(root, (gsap) => {
-  gsap.from('.hero-title', { y: 60, opacity: 0, duration: 1, ease: 'power3.out' })
-  gsap.from('.hero-sub', { y: 30, opacity: 0, duration: 1, delay: 0.2, ease: 'power3.out' })
-
-  gsap.utils.toArray<HTMLElement>('.box').forEach((box) => {
-    gsap.from(box, {
-      scrollTrigger: { trigger: box, start: 'top 85%' },
-      y: 80,
-      opacity: 0,
-      duration: 0.8,
-      ease: 'power2.out',
-    })
-  })
-})
-</script>
-
-<template>
-  <main ref="root" class="min-h-screen bg-slate-950 text-white">
-    <section class="flex h-screen flex-col items-center justify-center gap-4 text-center">
-      <h1 class="hero-title text-6xl font-bold text-brand">Nuxt + Tailwind + GSAP</h1>
-      <p class="hero-sub text-lg text-slate-400">Déployé sur Cloudflare Workers 🚀</p>
-    </section>
-
-    <section class="mx-auto grid max-w-4xl gap-8 px-6 pb-32">
-      <div
-        v-for="i in 6"
-        :key="i"
-        class="box rounded-2xl bg-slate-800 p-10 text-2xl font-semibold"
-      >
-        Bloc {{ i }}
-      </div>
-    </section>
-  </main>
-</template>
-EOF
-ok "Plugin, composable et page de démo GSAP"
-
-# ---------- 7. Wrangler ----------
-step "Configuration de Wrangler"
 cat > wrangler.jsonc <<EOF
 {
   "\$schema": "node_modules/wrangler/config-schema.json",
-  "name": "${WORKER_NAME}",
+  "name": "$APP_NAME",
   "main": "./.output/server/index.mjs",
-  "compatibility_date": "${TODAY}",
+  "compatibility_date": "$COMPAT_DATE",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "binding": "ASSETS",
     "directory": "./.output/public/"
   },
-  "observability": {
-    "enabled": true
-  }
+  "observability": { "enabled": true },
+  "preview_urls": true
+
+  // Exemples de bindings (décommente après création) :
+  // "kv_namespaces": [{ "binding": "CACHE", "id": "<KV_ID>" }],
+  // "d1_databases": [{ "binding": "DB", "database_name": "my-db", "database_id": "<D1_ID>" }]
 }
 EOF
 
-cat > .dev.vars.example <<'EOF'
-# Copie ce fichier en .dev.vars pour tes secrets locaux (wrangler dev)
-# NUXT_API_SECRET=changeme
+cat > tsconfig.json <<'EOF'
+{
+  "files": [],
+  "references": [
+    { "path": "./.nuxt/tsconfig.app.json" },
+    { "path": "./.nuxt/tsconfig.server.json" },
+    { "path": "./.nuxt/tsconfig.shared.json" },
+    { "path": "./.nuxt/tsconfig.node.json" }
+  ]
+}
 EOF
-ok "wrangler.jsonc"
 
-# ---------- 8. Scripts ----------
-step "Ajout des scripts"
-npm pkg set \
-  scripts.preview="pnpm build && wrangler dev" \
-  scripts.deploy="pnpm build && wrangler deploy" \
-  scripts.cf:typegen="wrangler types" \
-  scripts.cf:login="wrangler login" \
-  scripts.lint="eslint ." \
-  scripts.lint:fix="eslint . --fix" \
-  scripts.format="prettier --write ." \
-  scripts.typecheck="nuxt typecheck"
-ok "Scripts ajoutés"
+# ----------------------------------------------------------------------------
+# 4. Qualité : Oxlint + ESLint (Vue/Nuxt) + Oxfmt + Lefthook
+# ----------------------------------------------------------------------------
+info "Configuration Oxlint / ESLint / Oxfmt / Lefthook"
 
-# ---------- 9. ESLint / Prettier / EditorConfig ----------
-step "Lint & formatage"
+cat > .oxlintrc.json <<'EOF'
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "import", "vue"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "ignorePatterns": [".nuxt", ".output", ".wrangler", "worker-configuration.d.ts"]
+}
+EOF
+
 cat > eslint.config.mjs <<'EOF'
+// @ts-check
+// ESLint ne garde que ce qu'Oxlint ne sait pas faire (templates Vue, règles Nuxt).
+// eslint-plugin-oxlint désactive les règles en doublon : il doit rester en dernier.
+import oxlint from 'eslint-plugin-oxlint'
 import withNuxt from './.nuxt/eslint.config.mjs'
 
-export default withNuxt()
+export default withNuxt(...oxlint.buildFromOxlintConfigFile('./.oxlintrc.json'))
 EOF
 
-cat > .prettierrc <<'EOF'
+cat > .oxfmtrc.json <<'EOF'
 {
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
   "semi": false,
   "singleQuote": true,
-  "printWidth": 100,
   "trailingComma": "all",
-  "plugins": ["prettier-plugin-tailwindcss"]
+  "endOfLine": "lf",
+  "sortTailwindcss": {
+    "stylesheet": "./app/assets/css/main.css"
+  },
+  "ignorePatterns": [
+    ".nuxt",
+    ".output",
+    ".wrangler",
+    "node_modules",
+    "pnpm-lock.yaml",
+    "worker-configuration.d.ts"
+  ]
 }
 EOF
 
-cat > .prettierignore <<'EOF'
-.nuxt
-.output
-.wrangler
-node_modules
-dist
-pnpm-lock.yaml
+cat > lefthook.yml <<'EOF'
+# Hooks Git rapides (binaire natif, commandes en parallèle)
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      glob: "*.{js,mjs,ts,vue}"
+      run: pnpm oxlint {staged_files}
+    format:
+      glob: "*.{js,mjs,ts,vue,json,jsonc,css,md,yml,yaml}"
+      run: pnpm oxfmt --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+
+pre-push:
+  commands:
+    typecheck:
+      run: pnpm typecheck
 EOF
 
 cat > .editorconfig <<'EOF'
@@ -272,70 +334,79 @@ indent_size = 2
 end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
 EOF
 
-cat >> .gitignore <<'EOF'
+echo "24" > .nvmrc
 
-# Cloudflare
-.wrangler
-.dev.vars*
-!.dev.vars.example
-worker-configuration.d.ts
-
-# Lockfiles d'autres gestionnaires (on utilise pnpm)
-package-lock.json
-yarn.lock
+cat > .dev.vars.example <<'EOF'
+# Copie ce fichier en .dev.vars pour `wrangler dev` (jamais commité)
+# En prod : pnpm wrangler secret put NOM_DU_SECRET
+NUXT_API_SECRET=change-me
 EOF
-ok "ESLint, Prettier, EditorConfig, .gitignore"
 
-# ---------- 10. VS Code ----------
-step "Configuration VS Code"
-mkdir -p .vscode
+# ----------------------------------------------------------------------------
+# 5. VS Code : settings / extensions / tasks / launch
+# ----------------------------------------------------------------------------
+info "Configuration VS Code"
 
 cat > .vscode/extensions.json <<'EOF'
 {
   "recommendations": [
     "Vue.volar",
-    "bradlc.vscode-tailwindcss",
+    "oxc.oxc-vscode",
     "dbaeumer.vscode-eslint",
-    "esbenp.prettier-vscode",
-    "EditorConfig.EditorConfig",
-    "antfu.goto-alias"
-  ]
+    "bradlc.vscode-tailwindcss",
+    "nuxtr.nuxtr-vscode",
+    "usernamehw.errorlens",
+    "editorconfig.editorconfig"
+  ],
+  "unwantedRecommendations": ["esbenp.prettier-vscode"]
 }
 EOF
 
-cat > .vscode/settings.json <<EOF
+cat > .vscode/settings.json <<'EOF'
 {
   "npm.packageManager": "pnpm",
 
+  // Formatage : Oxfmt via l'extension Oxc
+  "oxc.fmt.configPath": ".oxfmtrc.json",
+  "editor.defaultFormatter": "oxc.oxc-vscode",
   "editor.formatOnSave": true,
-  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSaveMode": "file",
+  "[vue]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[typescript]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[javascript]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[json]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[jsonc]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[tailwindcss]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[css]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[markdown]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+  "[yaml]": { "editor.defaultFormatter": "oxc.oxc-vscode" },
+
+  // Lint : corrections Oxlint puis ESLint à la sauvegarde
   "editor.codeActionsOnSave": {
+    "source.fixAll.oxc": "explicit",
     "source.fixAll.eslint": "explicit"
   },
-  "eslint.useFlatConfig": true,
-  "eslint.validate": ["javascript", "typescript", "vue"],
 
+  "files.eol": "\n",
   "files.associations": {
     "*.css": "tailwindcss",
     "wrangler.json": "jsonc"
   },
-  "tailwindCSS.experimental.configFile": "${SRC}/assets/css/main.css",
-  "tailwindCSS.classAttributes": ["class", "ui", ":class"],
+  "tailwindCSS.experimental.configFile": "app/assets/css/main.css",
   "editor.quickSuggestions": { "strings": "on" },
 
   "typescript.tsdk": "node_modules/typescript/lib",
 
-  "files.exclude": {
-    "**/.nuxt": true,
-    "**/.output": true,
-    "**/.wrangler": true
-  },
   "search.exclude": {
-    "**/node_modules": true,
     "**/.nuxt": true,
     "**/.output": true,
+    "**/.wrangler": true,
+    "**/node_modules": true,
     "pnpm-lock.yaml": true
   }
 }
@@ -346,26 +417,44 @@ cat > .vscode/tasks.json <<'EOF'
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Nuxt: dev",
-      "type": "shell",
-      "command": "pnpm dev",
+      "label": "nuxt: dev",
+      "type": "npm",
+      "script": "dev",
       "isBackground": true,
-      "problemMatcher": [],
-      "group": { "kind": "build", "isDefault": true }
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "owner": "nuxt",
+        "pattern": { "regexp": "^__never__$" },
+        "background": {
+          "activatesBeforeEnd": true,
+          "beginsPattern": "Nuxt",
+          "endsPattern": "Local:"
+        }
+      }
     },
-    { "label": "Nuxt: build", "type": "shell", "command": "pnpm build", "problemMatcher": [] },
+    { "label": "nuxt: build", "type": "npm", "script": "build", "group": "build", "problemMatcher": [] },
     {
-      "label": "Cloudflare: preview (wrangler dev)",
-      "type": "shell",
-      "command": "pnpm preview",
+      "label": "cf: preview (wrangler dev)",
+      "type": "npm",
+      "script": "preview",
       "isBackground": true,
-      "problemMatcher": []
+      "problemMatcher": {
+        "owner": "wrangler",
+        "pattern": { "regexp": "^__never__$" },
+        "background": {
+          "activatesBeforeEnd": true,
+          "beginsPattern": "Building|nuxt build",
+          "endsPattern": "Ready on"
+        }
+      }
     },
-    { "label": "Cloudflare: deploy", "type": "shell", "command": "pnpm deploy:cf", "problemMatcher": [] },
-    { "label": "Cloudflare: login", "type": "shell", "command": "pnpm cf:login", "problemMatcher": [] },
-    { "label": "Cloudflare: typegen", "type": "shell", "command": "pnpm cf:typegen", "problemMatcher": [] },
-    { "label": "Lint: fix", "type": "shell", "command": "pnpm lint:fix", "problemMatcher": ["$eslint-stylish"] },
-    { "label": "Typecheck", "type": "shell", "command": "pnpm typecheck", "problemMatcher": ["$tsc"] },
+    { "label": "cf: ship (prod)", "type": "npm", "script": "ship", "problemMatcher": [] },
+    { "label": "cf: ship preview (version)", "type": "npm", "script": "ship:preview", "problemMatcher": [] },
+    { "label": "cf: types", "type": "npm", "script": "cf-typegen", "problemMatcher": [] },
+    { "label": "lint", "type": "npm", "script": "lint", "problemMatcher": ["$eslint-stylish"] },
+    { "label": "format", "type": "npm", "script": "format", "problemMatcher": [] },
+    { "label": "typecheck", "type": "npm", "script": "typecheck", "problemMatcher": ["$tsc"] },
+    { "label": "check (lint + format + types)", "type": "npm", "script": "check", "problemMatcher": [] },
     { "label": "pnpm: install", "type": "shell", "command": "pnpm install", "problemMatcher": [] }
   ]
 }
@@ -376,14 +465,6 @@ cat > .vscode/launch.json <<'EOF'
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "node",
-      "request": "launch",
-      "name": "server: nuxt",
-      "outputCapture": "std",
-      "program": "${workspaceFolder}/node_modules/nuxt/bin/nuxt.mjs",
-      "args": ["dev"]
-    },
-    {
       "type": "chrome",
       "request": "launch",
       "name": "client: chrome",
@@ -393,10 +474,18 @@ cat > .vscode/launch.json <<'EOF'
     {
       "type": "node",
       "request": "launch",
-      "name": "cloudflare: wrangler dev",
+      "name": "server: nuxt",
+      "outputCapture": "std",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["preview"],
-      "console": "integratedTerminal"
+      "runtimeArgs": ["nuxt", "dev"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "client: chrome (wrangler :8787)",
+      "url": "http://localhost:8787",
+      "webRoot": "${workspaceFolder}"
     }
   ],
   "compounds": [
@@ -407,55 +496,262 @@ cat > .vscode/launch.json <<'EOF'
   ]
 }
 EOF
-ok ".vscode/ (settings, tasks, launch, extensions)"
 
-# ---------- 11. GitHub Actions ----------
-step "Workflow GitHub Actions"
-mkdir -p .github/workflows
-cat > .github/workflows/deploy.yml <<'EOF'
-name: Deploy to Cloudflare Workers
+# ----------------------------------------------------------------------------
+# 6. Code applicatif (Tailwind + GSAP à la demande + API démo)
+# ----------------------------------------------------------------------------
+info "Création des fichiers de l'app"
+
+cat > app/assets/css/main.css <<'EOF'
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+}
+
+/* Évite le flash du hero avant le chargement de GSAP.
+   Si l'utilisateur préfère moins d'animations, rien n'est caché. */
+@media (prefers-reduced-motion: no-preference) {
+  [data-anim="hero"] > * {
+    visibility: hidden;
+  }
+}
+EOF
+
+cat > app/app.vue <<'EOF'
+<template>
+  <div>
+    <NuxtRouteAnnouncer />
+    <NuxtPage />
+  </div>
+</template>
+EOF
+
+cat > app/composables/useGsap.ts <<'EOF'
+import type { Ref } from 'vue'
+
+type Gsap = (typeof import('gsap'))['gsap']
+type ScrollTriggerStatic = (typeof import('gsap/ScrollTrigger'))['ScrollTrigger']
+
+export interface GsapTools {
+  gsap: Gsap
+  ScrollTrigger: ScrollTriggerStatic
+}
+
+/**
+ * Charge GSAP + ScrollTrigger côté client, uniquement sur les pages qui l'utilisent.
+ * - Animations désactivées si l'utilisateur préfère moins d'animations.
+ * - Nettoyage automatique (tweens, ScrollTriggers) au démontage.
+ */
+export function useGsap(setup: (tools: GsapTools) => void, scope?: Ref<HTMLElement | null>) {
+  let mm: ReturnType<Gsap['matchMedia']> | undefined
+  let disposed = false
+
+  onMounted(async () => {
+    const [{ gsap }, { ScrollTrigger }] = await Promise.all([
+      import('gsap'),
+      import('gsap/ScrollTrigger'),
+    ])
+    if (disposed) return
+
+    gsap.registerPlugin(ScrollTrigger)
+    mm = gsap.matchMedia(scope?.value ?? undefined)
+    mm.add('(prefers-reduced-motion: no-preference)', () => setup({ gsap, ScrollTrigger }))
+  })
+
+  onBeforeUnmount(() => {
+    disposed = true
+    mm?.revert()
+  })
+}
+EOF
+
+cat > app/pages/index.vue <<'EOF'
+<script setup lang="ts">
+const root = ref<HTMLElement | null>(null)
+
+useGsap(({ gsap }) => {
+  // fromTo : le CSS cache le hero au départ, on le rend visible ici
+  gsap.fromTo(
+    '[data-anim="hero"] > *',
+    { y: 40, autoAlpha: 0 },
+    { y: 0, autoAlpha: 1, duration: 0.9, ease: 'power3.out', stagger: 0.12 },
+  )
+
+  gsap.utils.toArray<HTMLElement>('[data-anim="card"]').forEach((card) => {
+    gsap.from(card, {
+      y: 60,
+      autoAlpha: 0,
+      duration: 0.8,
+      ease: 'power2.out',
+      scrollTrigger: { trigger: card, start: 'top 85%' },
+    })
+  })
+}, root)
+
+// Page prérendue : on appelle l'API côté client pour voir le Worker répondre en live
+const { data } = useFetch('/api/hello', { server: false, lazy: true })
+</script>
+
+<template>
+  <main ref="root" class="min-h-screen bg-zinc-950 font-sans text-zinc-100">
+    <section
+      data-anim="hero"
+      class="mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center gap-6 px-6 text-center"
+    >
+      <h1 class="text-5xl font-bold tracking-tight md:text-7xl">
+        Nuxt <span class="text-brand-500">×</span> Tailwind
+        <span class="text-brand-500">×</span> GSAP
+      </h1>
+      <p class="text-lg text-zinc-400">Prérendu et servi par Cloudflare Workers.</p>
+      <p class="font-mono text-sm text-zinc-500">API : {{ data?.message ?? '…' }}</p>
+    </section>
+
+    <section class="mx-auto grid max-w-5xl gap-6 px-6 pb-32 md:grid-cols-3">
+      <article
+        v-for="n in 6"
+        :key="n"
+        data-anim="card"
+        class="rounded-2xl border border-zinc-800 bg-zinc-900 p-6"
+      >
+        <h2 class="mb-2 text-xl font-semibold">Card {{ n }}</h2>
+        <p class="text-zinc-400">Animée au scroll avec ScrollTrigger.</p>
+      </article>
+    </section>
+  </main>
+</template>
+EOF
+
+cat > server/api/hello.ts <<'EOF'
+export default defineEventHandler(() => ({
+  message: 'Hello depuis un Cloudflare Worker 👋',
+  time: new Date().toISOString(),
+}))
+EOF
+
+cat > public/robots.txt <<'EOF'
+User-agent: *
+Allow: /
+EOF
+
+# ----------------------------------------------------------------------------
+# 7. CI GitHub Actions : check → deploy (main) / version d'aperçu (PR)
+# ----------------------------------------------------------------------------
+cat > .github/workflows/ci.yml <<'EOF'
+name: CI / Deploy
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  deploy:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      # Lit la version dans le champ "packageManager" du package.json
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4 # lit "packageManager" dans package.json
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
 
+  deploy:
+    needs: check
+    # Pas de secrets sur les PR venant de forks → on saute
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: pnpm
-          command: deploy
+          # main → production ; PR → version d'aperçu, la prod n'est pas touchée
+          command: ${{ github.event_name == 'pull_request' && 'versions upload' || 'deploy' }}
 EOF
-ok "deploy.yml"
 
-# ---------- 12. Finalisation ----------
-step "Génération des types Nuxt"
-pnpm nuxt prepare >/dev/null 2>&1 || warn "nuxt prepare a échoué, relance 'pnpm nuxt prepare' à la main."
+# ----------------------------------------------------------------------------
+# 8. Installation des dépendances
+# ----------------------------------------------------------------------------
+info "Installation des dépendances (runtime)"
+pnpm add nuxt vue vue-router gsap
 
-git add -A >/dev/null 2>&1 && git commit -m "chore: init Nuxt + Tailwind + GSAP + Cloudflare (pnpm)" >/dev/null 2>&1 \
-  || warn "Commit initial non effectué (git non configuré ?)"
+info "Installation des dépendances (dev)"
+pnpm add -D \
+  tailwindcss @tailwindcss/vite \
+  @nuxt/fonts \
+  wrangler \
+  oxlint oxfmt \
+  @nuxt/eslint eslint eslint-plugin-oxlint \
+  typescript vue-tsc \
+  lefthook
 
-echo -e "\n${GREEN}🎉 Projet '$PROJECT_NAME' prêt !${NC}\n"
-echo "  cd $PROJECT_NAME"
-echo "  pnpm dev          # dev local  -> http://localhost:3000"
-echo "  pnpm cf:login     # connexion Cloudflare (une seule fois)"
-echo "  pnpm preview      # test dans le runtime Workers -> http://localhost:8787"
-echo "  pnpm deploy:cf    # déploiement en prod"
+# postinstall ajouté APRÈS l'install, sinon `nuxt prepare` se lance
+# alors que les modules Nuxt ne sont pas encore installés
+node -e '
+const fs = require("fs");
+const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+p.scripts.postinstall = "nuxt prepare";
+fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");
+'
+pnpm nuxt prepare
+
+info "Installation des hooks Git (Lefthook)"
+pnpm lefthook install
+
+info "Formatage initial (Oxfmt)"
+pnpm format
+
+# ----------------------------------------------------------------------------
+# 9. Commit initial
+# ----------------------------------------------------------------------------
+info "Commit initial"
+git add -A
+if $GIT_USER_OK; then
+  # LEFTHOOK=0 : on saute les hooks pour ce commit (tout vient d'être formaté)
+  LEFTHOOK=0 git commit -qm "chore: init Nuxt + Tailwind + GSAP + Cloudflare Workers (v3)"
+  ok "Commit initial créé sur 'main'"
+else
+  warn "Fichiers indexés mais non commités. Configure Git puis :"
+  echo '    git config --global user.name "Ton Nom"'
+  echo '    git config --global user.email "toi@exemple.fr"'
+  echo '    git commit -m "chore: init"'
+fi
+
+# ----------------------------------------------------------------------------
+# Fin
+# ----------------------------------------------------------------------------
+ok "Projet '$APP_NAME' prêt !"
+cat <<EOF
+
+Prochaines étapes :
+  cd $APP_NAME
+  code .                  # ouvre VS Code (installe les extensions recommandées)
+  pnpm dev                # http://localhost:3000
+  pnpm check              # lint + format + types
+  pnpm wrangler login     # connexion Cloudflare (une seule fois)
+  pnpm preview            # runtime Workers en local -> http://localhost:8787
+  pnpm ship               # mise en ligne sur *.workers.dev
+
+EOF
