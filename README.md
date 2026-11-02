@@ -52,7 +52,7 @@ cd mon-projet
 
 ### 2.2 Tailwind CSS v4
 ```bash
-npm install -D tailwindcss @tailwindcss/vite
+pnpm install -D tailwindcss @tailwindcss/vite
 ```
 - Ajoute `tailwindcss()` dans `vite.plugins` de `nuxt.config.ts`
 - Crée `app/assets/css/main.css` avec `@import "tailwindcss";`
@@ -60,21 +60,21 @@ npm install -D tailwindcss @tailwindcss/vite
 
 ### 2.3 GSAP
 ```bash
-npm install gsap
+pnpm install gsap
 ```
 - Crée `app/plugins/gsap.client.ts` (enregistre ScrollTrigger)
 - Crée `app/composables/useGsap.ts` (contexte et nettoyage automatique)
 
 ### 2.4 Cloudflare / Wrangler
 ```bash
-npm install -D wrangler
+pnpm install -D wrangler
 ```
 - Dans `nuxt.config.ts` : `nitro.preset = 'cloudflare_module'`
 - Crée `wrangler.jsonc` (voir le script)
 
 ### 2.5 Lint & formatage
 ```bash
-npm install -D @nuxt/eslint eslint prettier prettier-plugin-tailwindcss typescript vue-tsc
+pnpm install -D @nuxt/eslint eslint prettier prettier-plugin-tailwindcss typescript vue-tsc
 ```
 
 ---
